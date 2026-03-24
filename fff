@@ -1,0 +1,378 @@
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+
+public class Charactercontrol : MonoBehaviour
+{
+    // --- Компоненты ---
+    Animator animator;
+    BoxCollider2D box2d;
+    Rigidbody2D rb2d;
+    SpriteRenderer sprite;
+    
+    // --- Ввод (Inputs) ---
+    float keyHorizontal;
+    float keyVertical;
+    bool keyJump;
+    bool keyShoot;
+    private bool keyShootRelease; // ИСПРАВЛЕНО: Добавлена переменная
+
+    // --- Состояния (States) ---
+    bool isGrounded;
+    bool isJumping;
+    bool isShooting;
+    bool isThrowing = false;          
+    bool isTeleporting;
+    bool isTakingDamage;
+    bool isInvincible;
+    bool isFacingRight = true;
+
+    // --- Лестницы (Ladders) ---
+    bool isClimbing;
+    bool isClimbingDown;
+    bool atLaddersEnd;
+    bool startedClimbTransition;
+    bool finishedClimbTransition;
+    float transformY;
+    float transformHY;
+
+    // --- Физика и Бои ---
+    bool freezeInput;
+    bool freezePlayer;
+    private float shootTime; // ИСПРАВЛЕНО: Добавлена переменная
+    private float shootAnimTimer; 
+
+    // --- Слои (Layers) ---
+    int groundLayerMask;
+    int teleportLayer;
+    int playerLayer;
+
+    // --- Оружие (Weapon System - Бхимани стиль) ---
+    public enum WeaponTypes
+    {
+        HyperBomb, ThunderBeam, SuperArm, IceSlasher, 
+        RollingCutter, FireStorm, MagnetBeam, MegaBuster
+    }
+    public WeaponTypes playerWeapon = WeaponTypes.MegaBuster;
+
+    [System.Serializable]
+    public struct WeaponsStruct
+    {
+        public WeaponTypes weaponType;
+        public bool enabled;
+        public int currentEnergy;
+        public int maxEnergy;
+        public int energyCost;
+        public int weaponDamage;
+        public Vector2 weaponVelocity;
+        public AudioClip weaponClip;
+        public GameObject weaponPrefab;
+    }
+    public WeaponsStruct[] weaponsData;
+    private bool canUseWeapon = true;
+
+    // --- Зарядка Buster ---
+    private bool isCharging = false;
+    private float chargeTime = 0f;
+    private bool chargeShotReady = false;
+
+    // --- Dash/Slide (Mega Man Zero Style) ---
+    [Header("Dash Settings")]
+    public float dashSpeed = 8.0f;     
+    public float dashDuration = 0.45f; 
+    public float dashCooldown = 0.3f;  
+    private bool canDash = true;
+    private bool isDashing = false;
+    private float dashTimeLeft = 0f;
+
+    [SerializeField, Range(0.1f, 1f)] float dashColliderHeightMultiplier = 0.6f; 
+    private Vector2 originalColliderSize;
+    private Vector2 originalColliderOffset;
+
+    // --- Характеристики ---
+    public int currentHealth;
+    public int maxHealth = 28;
+    [SerializeField] float moveSpeed = 1.8f;
+    [SerializeField] float jumpSpeed = 4.2f; 
+    [SerializeField] float climbSpeed = 0.525f;
+    [SerializeField] float climbSpriteHeight = 0.36f;
+    [SerializeField] int bulletDamage = 1;
+    [SerializeField] float bulletSpeed = 5f;
+
+    [Header("Audio & Prefabs")]
+    [SerializeField] AudioClip jumpLandedClip;
+    [SerializeField] AudioClip shootBulletClip;
+    [SerializeField] AudioClip takingDamageClip;
+    [SerializeField] Transform bulletShootPos;
+    [SerializeField] GameObject bulletPrefab;
+    [SerializeField] GameObject explodeEffectPrefab;
+
+    [Header("Teleport Settings")]
+    [SerializeField] float teleportSpeed = -10f;
+    [SerializeField] float teleportLandingY = 0f;
+    public enum TeleportState { Descending, Landed, Idle };
+    public TeleportState teleportState;
+
+    [HideInInspector] public LadderScript ladder;
+
+    // ========================================================
+    // INITIALIZATION
+    // ========================================================
+
+    void Awake()
+    {
+        animator = GetComponent<Animator>();
+        box2d = GetComponent<BoxCollider2D>();
+        rb2d = GetComponent<Rigidbody2D>();
+        sprite = GetComponent<SpriteRenderer>();
+
+        groundLayerMask = 1 << LayerMask.NameToLayer("Ground");
+        teleportLayer = LayerMask.NameToLayer("Teleport");
+        playerLayer = LayerMask.NameToLayer("Player");
+
+        rb2d.collisionDetectionMode = CollisionDetectionMode2D.Continuous;
+        originalColliderSize = box2d.size;
+        originalColliderOffset = box2d.offset;
+    }
+
+    void Start()
+    {
+        currentHealth = maxHealth;
+        if (weaponsData == null || weaponsData.Length == 0) InitWeaponsData();
+    }
+
+    void InitWeaponsData()
+    {
+        int num = Enum.GetValues(typeof(WeaponTypes)).Length;
+        weaponsData = new WeaponsStruct[num];
+        for (int i = 0; i < num; i++)
+        {
+            weaponsData[i] = new WeaponsStruct {
+                weaponType = (WeaponTypes)i,
+                enabled = (i == (int)WeaponTypes.MegaBuster),
+                currentEnergy = 28, maxEnergy = 28, energyCost = 1,
+                weaponDamage = 1, weaponVelocity = new Vector2(5f, 0)
+            };
+        }
+    }
+
+    // ========================================================
+    // CORE UPDATE LOGIC
+    // ========================================================
+
+    void Update()
+    {
+        if (HandleTeleport()) return;
+
+        PlayerDirectionInput();
+        PlayerJumpInput();
+        PlayerShootInput();
+        HandleShootTimer();
+
+        // Dash Input
+        if (Input.GetKeyDown(KeyCode.LeftShift) && canDash && !isClimbing && isGrounded && !isDashing)
+            StartDash();
+
+        FireWeapon(); 
+        PlayerMovement();
+        UpdateAnimations(); 
+    }
+
+    void FixedUpdate()
+    {
+        CheckGrounded();
+        if (isDashing) ApplyDashPhysics();
+    }
+
+    // ========================================================
+    // ANIMATION SYSTEM (Centralized)
+    // ========================================================
+
+    void UpdateAnimations()
+    {
+        if (isTakingDamage) { animator.Play("hit"); return; }
+
+        if (isTeleporting)
+        {
+            if (teleportState == TeleportState.Descending) animator.Play("Player_Teleport");
+            else { animator.Play("idle"); animator.speed = 1; }
+            return;
+        }
+
+        if (isClimbing)
+        {
+            if (finishedClimbTransition) { animator.Play("idle"); animator.speed = 1; }
+            else
+            {
+                animator.Play(isShooting ? "ladder_shoot" : "ladder_climb");
+                animator.speed = (keyVertical != 0 || startedClimbTransition) ? 1 : 0;
+            }
+            return;
+        }
+        animator.speed = 1;
+
+        if (isDashing) { animator.Play("slide"); return; }
+
+        if (!isGrounded)
+        {
+            animator.Play(isShooting ? "shoot_jump" : "jump");
+            return;
+        }
+
+        if (keyHorizontal != 0)
+            animator.Play(isShooting ? "shoot_run" : "Run");
+        else
+        {
+            if (isThrowing) animator.Play("throw");
+            else if (isShooting) animator.Play("shoot");
+            else animator.Play("idle");
+        }
+    }
+
+    // ========================================================
+    // MOVEMENT & DASH
+    // ========================================================
+
+    void PlayerMovement()
+    {
+        if (freezePlayer) { rb2d.linearVelocity = new Vector2(0, rb2d.linearVelocity.y); return; }
+        transformY = transform.position.y;
+        transformHY = transformY + climbSpriteHeight;
+
+        if (isClimbing) HandleClimbingLogic();
+        else
+        {
+            if (isDashing)
+            {
+                dashTimeLeft -= Time.deltaTime;
+                if (dashTimeLeft <= 0 || (isFacingRight && keyHorizontal < 0) || (!isFacingRight && keyHorizontal > 0)) StopDash();
+                if (keyJump && isGrounded) { StopDash(); rb2d.linearVelocity = new Vector2(rb2d.linearVelocity.x, jumpSpeed); }
+            }
+            else
+            {
+                rb2d.linearVelocity = new Vector2(keyHorizontal * moveSpeed, rb2d.linearVelocity.y);
+                if (keyHorizontal != 0 && ((keyHorizontal > 0 && !isFacingRight) || (keyHorizontal < 0 && isFacingRight))) Flip();
+                if (keyJump && isGrounded) rb2d.linearVelocity = new Vector2(rb2d.linearVelocity.x, jumpSpeed);
+            }
+            StartClimbingUp();
+            StartClimbingDown();
+        }
+    }
+
+    void StartDash()
+    {
+        isDashing = true; dashTimeLeft = dashDuration; canDash = false;
+        AdjustColliderForSlide(true);
+    }
+
+    void StopDash()
+    {
+        isDashing = false; AdjustColliderForSlide(false);
+        StartCoroutine(DashCooldownRoutine());
+    }
+
+    void AdjustColliderForSlide(bool slide)
+    {
+        if (slide)
+        {
+            float newHeight = originalColliderSize.y * dashColliderHeightMultiplier;
+            box2d.size = new Vector2(originalColliderSize.x, newHeight);
+            box2d.offset = new Vector2(originalColliderOffset.x, originalColliderOffset.y - (originalColliderSize.y - newHeight) / 2f);
+        }
+        else
+        {
+            box2d.size = originalColliderSize;
+            box2d.offset = originalColliderOffset;
+        }
+    }
+
+    void ApplyDashPhysics() => rb2d.linearVelocity = new Vector2((isFacingRight ? 1f : -1f) * dashSpeed, rb2d.linearVelocity.y);
+
+    // ========================================================
+    // WEAPONS & SHOOTING
+    // ========================================================
+
+    void FireWeapon()
+    {
+        if (!canUseWeapon || freezeInput) return;
+        if (playerWeapon == WeaponTypes.MegaBuster) MegaBuster();
+        else if (playerWeapon == WeaponTypes.HyperBomb) HyperBomb();
+    }
+
+    void MegaBuster()
+    {
+        if (keyShoot && keyShootRelease)
+        {
+            ShootBullet(); TriggerShootAnimation();
+            isCharging = true; chargeTime = 0f; chargeShotReady = false;
+        }
+        if (keyShoot && isCharging)
+        {
+            chargeTime += Time.deltaTime;
+            if (chargeTime >= 1.2f) chargeShotReady = true;
+        }
+        if (!keyShoot && isCharging)
+        {
+            if (chargeShotReady) { ShootChargedBullet(); TriggerShootAnimation(); }
+            isCharging = false; chargeShotReady = false;
+        }
+    }
+
+    void ShootBullet()
+    {
+        GameObject b = Instantiate(bulletPrefab, bulletShootPos.position, Quaternion.identity);
+        var s = b.GetComponent<bulletControll>();
+        if(s) { s.SetBulletDirection(isFacingRight ? Vector2.right : Vector2.left); s.Shoot(); }
+        SoundManager.Instance?.Play(shootBulletClip);
+    }
+
+    void ShootChargedBullet() { /* Аналогично ShootBullet с множителем урона */ }
+
+    void HyperBomb()
+    {
+        if (keyShoot && keyShootRelease && canUseWeapon)
+        {
+            isThrowing = true; shootTime = Time.time;
+            // Логика создания префаба бомбы...
+        }
+        if (isThrowing && Time.time - shootTime >= 0.25f) isThrowing = false;
+    }
+
+    void TriggerShootAnimation() { shootAnimTimer = 0.35f; isShooting = true; }
+    void HandleShootTimer() { if (shootAnimTimer > 0) shootAnimTimer -= Time.deltaTime; else isShooting = false; }
+
+    // ========================================================
+    // UTILS (Physics, Input, Health)
+    // ========================================================
+
+    void CheckGrounded()
+    {
+        RaycastHit2D hit = Physics2D.BoxCast(box2d.bounds.center, new Vector2(box2d.bounds.size.x, 0.1f), 0f, Vector2.down, 0.1f, groundLayerMask);
+        isGrounded = hit.collider != null;
+    }
+
+    void PlayerDirectionInput() { keyHorizontal = freezeInput ? 0 : Input.GetAxisRaw("Horizontal"); keyVertical = freezeInput ? 0 : Input.GetAxisRaw("Vertical"); }
+    void PlayerJumpInput() { if (!freezeInput) keyJump = Input.GetKeyDown(KeyCode.Space); }
+    void PlayerShootInput() { bool was = keyShoot; keyShoot = Input.GetKey(KeyCode.C); keyShootRelease = keyShoot && !was; }
+
+    void Flip() { isFacingRight = !isFacingRight; transform.Rotate(0f, 180f, 0f); }
+
+    public void TakeDamage(int damage)
+    {
+        if (isInvincible || isTakingDamage) return;
+        currentHealth -= damage;
+        if (currentHealth <= 0) Defeat(); else StartDamageAnimation();
+    }
+
+    void StartDamageAnimation() { isTakingDamage = true; isInvincible = true; Invoke("StopDamage", 0.5f); }
+    void StopDamage() { isTakingDamage = false; StartCoroutine(Flash()); }
+    IEnumerator Flash() { for(int i=0; i<5; i++) { sprite.color = new Color(1,1,1,0); yield return new WaitForSeconds(0.1f); sprite.color = Color.white; yield return new WaitForSeconds(0.1f); } isInvincible = false; }
+    void Defeat() { if (explodeEffectPrefab) Instantiate(explodeEffectPrefab, transform.position, Quaternion.identity); Destroy(gameObject); }
+
+    bool HandleTeleport() { /* Логика телепортации */ return isTeleporting; }
+    void StartClimbingUp() { /* Логика входа на лестницу */ }
+    void StartClimbingDown() { /* Логика спуска на лестницу */ }
+    void HandleClimbingLogic() { /* Логика движения по лестнице */ }
+    IEnumerator DashCooldownRoutine() { yield return new WaitForSeconds(dashCooldown); canDash = true; }
+}
