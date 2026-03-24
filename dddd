@@ -1,0 +1,845 @@
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+
+public class Charactercontrol : MonoBehaviour
+{
+    // --- Компоненты ---
+    Animator animator;
+    BoxCollider2D box2d;
+    Rigidbody2D rb2d;
+    SpriteRenderer sprite;
+    ColorSwap colorSwap;
+    Collider2D currentPlatform;
+
+    // --- Ввод ---
+    float keyHorizontal;
+    float keyVertical;
+    bool keyJump;
+    bool keyShoot;
+
+    // --- Состояния ---
+    bool isGrounded;
+    bool isJumping;
+    bool isShooting;
+    bool isThrowing = false;          
+    bool isTeleporting;
+    bool isTakingDamage;
+    bool isInvincible;
+    bool isFacingRight = true;
+
+    // --- Лестницы ---
+    bool isClimbing;
+    bool isClimbingDown;
+    bool atLaddersEnd;
+    bool hasStartedClimbing;
+    bool startedClimbTransition;
+    bool finishedClimbTransition;
+    float transformY;
+    float transformHY;
+
+    // --- Физика и Бои ---
+    bool hitSideRight;
+    bool freezeInput;
+    bool freezePlayer;
+    bool freezeBullets;
+    RigidbodyConstraints2D rb2dConstraints;
+    
+    // --- Анимации и СТРЕЛЬБА ---
+    private float shootAnimTimer; // Таймер удержания позы стрельбы
+
+    // --- Оптимизация слоев ---
+    int groundLayerMask;
+    int teleportLayer;
+    int playerLayer;
+
+    // --- Оружие (Weapon System) ---
+    public enum WeaponTypes
+    {
+        HyperBomb, ThunderBeam, SuperArm, IceSlasher, 
+        RollingCutter, FireStorm, MagnetBeam, MegaBuster
+    }
+
+    public WeaponTypes playerWeapon = WeaponTypes.MegaBuster;
+
+    [System.Serializable]
+    public struct WeaponsStruct
+    {
+        public WeaponTypes weaponType;
+        public bool enabled;
+        public int currentEnergy;
+        public int maxEnergy;
+        public int energyCost;
+        public int weaponDamage;
+        public Vector2 weaponVelocity;
+        public AudioClip weaponClip;
+        public GameObject weaponPrefab;
+    }
+    public WeaponsStruct[] weaponsData;
+
+    private bool canUseWeapon = true;
+
+    // --- MegaBuster Charge Logic ---
+    private bool isCharging = false;
+    private float chargeTime = 0f;
+    private bool chargeShotReady = false;
+
+    // --- Dash Logic (Mega Man Zero Style - ИСПРАВЛЕНО) ---
+    [Header("Dash/Slide Settings (Zero Style)")]
+    public float dashSpeed = 8.0f;     // Скорость слайда
+    public float dashDuration = 0.45f; // Длительность
+    public float dashCooldown = 0.3f;  // Откат
+    private bool canDash = true;
+    private bool isDashing = false;
+    private float dashTimeLeft = 0f;
+
+    // ИСПРАВЛЕНИЕ: Переменные для изменения размера коллайдера во время слайда
+    [SerializeField, Range(0.1f, 1f)] float dashColliderHeightMultiplier = 0.6f; // На сколько процентов уменьшить коллайдер
+    private Vector2 originalColliderSize;
+    private Vector2 originalColliderOffset;
+
+    // --- Старая система оружия (для совместимости) ---
+    public enum PlayerWeapons { Default, MagnetBeam, BombMan, CutMan, ElecMan, FireMan, GutsMan, IceMan };
+    public PlayerWeapons playerWeaponLegacy = PlayerWeapons.Default;
+
+    [System.Serializable]
+    public struct PlayerWeaponsStruct
+    {
+        public PlayerWeapons weapon;
+        public bool enabled;
+        public int currentEnergy;
+        public int maxEnergy;
+        public int energyCost;
+        public int weaponDamage;
+        public GameObject weaponPrefab;
+    }
+    public PlayerWeaponsStruct[] playerWeaponStructs;
+
+    // --- Характеристики ---
+    public int currentHealth;
+    public int maxHealth = 28;
+
+    [SerializeField] float moveSpeed = 1.8f;
+    [SerializeField] float jumpSpeed = 4.2f; 
+    [SerializeField] float climbSpeed = 0.525f;
+    [SerializeField] float climbSpriteHeight = 0.36f;
+
+    [SerializeField] int bulletDamage = 1;
+    [SerializeField] float bulletSpeed = 5f;
+
+    [Header("Audio Clips")]
+    [SerializeField] AudioClip teleportClip;
+    [SerializeField] AudioClip jumpLandedClip;
+    [SerializeField] AudioClip shootBulletClip;
+    [SerializeField] AudioClip takingDamageClip;
+    [SerializeField] AudioClip explodeEffectClip;
+    [SerializeField] AudioClip energyFillClip;
+
+    [Header("Positions and Prefabs")]
+    [SerializeField] Transform bulletShootPos;
+    [SerializeField] GameObject bulletPrefab;
+    [SerializeField] GameObject explodeEffectPrefab;
+
+    [Header("Teleport Settings")]
+    [SerializeField] float teleportSpeed = -10f;
+    [SerializeField] float teleportLandingY = 0f;
+    public enum TeleportState { Descending, Landed, Idle };
+    [SerializeField] TeleportState teleportState;
+
+    [HideInInspector] public LadderScript ladder;
+
+    // ========================================================
+    // INITIALIZATION
+    // ========================================================
+
+    void Awake()
+    {
+        animator = GetComponent<Animator>();
+        box2d = GetComponent<BoxCollider2D>();
+        rb2d = GetComponent<Rigidbody2D>();
+        sprite = GetComponent<SpriteRenderer>();
+
+        groundLayerMask = 1 << LayerMask.NameToLayer("Ground");
+        teleportLayer = LayerMask.NameToLayer("Teleport");
+        playerLayer = LayerMask.NameToLayer("Player");
+
+        // ИСПРАВЛЕНИЕ: Непрерывная проверка столкновений обязательна
+        rb2d.collisionDetectionMode = CollisionDetectionMode2D.Continuous;
+
+        // ИСПРАВЛЕНИЕ: Сохраняем исходные параметры коллайдера
+        originalColliderSize = box2d.size;
+        originalColliderOffset = box2d.offset;
+    }
+
+    void Start()
+    {
+        currentHealth = maxHealth;
+        colorSwap = GetComponent<ColorSwap>();
+        SetWeaponLegacy(playerWeaponLegacy);
+        FillWeaponEnergies();
+
+        if (weaponsData == null || weaponsData.Length == 0) InitWeaponsData();
+        SetWeapon(playerWeapon);
+
+#if UNITY_STANDALONE
+        GameObject inputCanvas = GameObject.Find("InputCanvas");
+        if (inputCanvas != null) inputCanvas.SetActive(false);
+#endif
+    }
+
+    void InitWeaponsData()
+    {
+        int num = Enum.GetValues(typeof(WeaponTypes)).Length;
+        weaponsData = new WeaponsStruct[num];
+        for (int i = 0; i < num; i++)
+        {
+            weaponsData[i] = new WeaponsStruct
+            {
+                weaponType = (WeaponTypes)i,
+                enabled = (i == (int)WeaponTypes.MegaBuster),
+                currentEnergy = 100, maxEnergy = 100, energyCost = 10,
+                weaponDamage = 1, weaponVelocity = new Vector2(5f, 0)
+            };
+        }
+    }
+
+    // ========================================================
+    // PHYSICS (FIXED UPDATE)
+    // ========================================================
+
+    void FixedUpdate()
+    {
+        CheckGrounded();
+        
+        // ИСПРАВЛЕНИЕ: Применяем физику дэша в FixedUpdate для стабильности
+        if (isDashing)
+        {
+            ApplyDashPhysics();
+        }
+    }
+
+    void CheckGrounded()
+    {
+        isGrounded = false;
+        float raycastDistance = 0.05f;
+
+        Vector3 box_origin = box2d.bounds.center;
+        box_origin.y = box2d.bounds.min.y + (box2d.bounds.extents.y / 4f);
+        Vector3 box_size = box2d.bounds.size;
+        box_size.y = box2d.bounds.size.y / 4f;
+        
+        RaycastHit2D raycastHit = Physics2D.BoxCast(box_origin, box_size, 0f, Vector2.down, raycastDistance, groundLayerMask);
+
+        if (raycastHit.collider != null && gameObject.layer != teleportLayer)
+        {
+            isGrounded = true;
+            if (isJumping)
+            {
+                isJumping = false;
+                SoundManager.Instance?.Play(jumpLandedClip);
+            }
+        }
+    }
+
+    void ApplyDashPhysics()
+    {
+        float dashDir = isFacingRight ? 1f : -1f;
+        // Во время слайда по горизонтали мы летим, а по вертикали просто падаем под гравитацией
+        rb2d.linearVelocity = new Vector2(dashDir * dashSpeed, rb2d.linearVelocity.y);
+    }
+
+    // ========================================================
+    // CORE UPDATE
+    // ========================================================
+
+    void Update()
+    {
+        if (HandleTeleport()) return;
+
+        PlayerDebugInput();
+        PlayerDirectionInput();
+        PlayerJumpInput();
+        PlayerShootInput();
+
+        // Управление временем анимации стрельбы
+        HandleShootTimer();
+
+        // Проверка старта деша (Input лучше считывать в Update)
+        if (Input.GetKeyDown(KeyCode.LeftShift) && canDash && !isClimbing && !isTakingDamage && isGrounded && !isDashing)
+        {
+            StartDash();
+        }
+
+        FireWeapon(); 
+        PlayerMovement();
+
+        // ИСПРАВЛЕНИЕ: Вызываем единый метод обновления анимаций
+        UpdateAnimations(); 
+    }
+
+    bool HandleTeleport()
+    {
+        if (!isTeleporting) return false;
+
+        switch (teleportState)
+        {
+            case TeleportState.Descending:
+                isJumping = false;
+                if (isGrounded || transform.position.y <= teleportLandingY)
+                {
+                    gameObject.tag = "Player";
+                    gameObject.layer = playerLayer;
+                    rb2d.linearVelocity = Vector2.zero;
+                    rb2d.constraints = RigidbodyConstraints2D.FreezeAll;
+                    teleportState = TeleportState.Landed;
+                }
+                break;
+            case TeleportState.Landed:
+                break;
+            case TeleportState.Idle:
+                Teleport(false);
+                break;
+        }
+        return true;
+    }
+
+    // ========================================================
+    // НОВАЯ ИСПРАВЛЕННАЯ СИСТЕМА АНИМАЦИЙ
+    // ========================================================
+
+    void UpdateAnimations()
+    {
+        // Приоритет 1: Урон
+        if (isTakingDamage)
+        {
+            animator.Play("hit");
+            return;
+        }
+
+        // Приоритет 2: Телепорт
+        if (isTeleporting)
+        {
+            if (teleportState == TeleportState.Descending) animator.Play("Player_Teleport");
+            else { animator.Play("idle"); animator.speed = 1; }
+            return;
+        }
+
+        // Приоритет 3: Лестница
+        if (isClimbing)
+        {
+            if (finishedClimbTransition) { animator.Play("idle"); animator.speed = 1; } // Стоим на вершине
+            else
+            {
+                animator.Play(isShooting ? "ladder_shoot" : "ladder_climb");
+                // Останавливаем кадр анимации, если не двигаемся по вертикали
+                animator.speed = (keyVertical != 0 || startedClimbTransition) ? 1 : 0;
+            }
+            return;
+        }
+        animator.speed = 1; // Возвращаем скорость в норму
+
+        // Приоритет 4: Слайд (Деш)
+        if (isDashing)
+        {
+            animator.Play("slide");
+            return;
+        }
+
+        // Приоритет 5: Воздух (Прыжок/Падение)
+        if (!isGrounded)
+        {
+            if (isShooting) animator.Play("shoot_jump");
+            else animator.Play("jump");
+            return;
+        }
+
+        // Приоритет 6: Движение по земле (Бег)
+        if (keyHorizontal != 0)
+        {
+            if (isShooting) animator.Play("shoot_run");
+            else animator.Play("Run");
+        }
+        else
+        {
+            // Приоритет 7: Покой (Idle)
+            if (isThrowing) animator.Play("throw"); // Анимация броска бомбы
+            else if (isShooting) animator.Play("shoot");
+            else animator.Play("idle");
+        }
+    }
+
+    void HandleShootTimer()
+    {
+        if (shootAnimTimer > 0)
+        {
+            shootAnimTimer -= Time.deltaTime;
+            isShooting = true;
+        }
+        else
+        {
+            isShooting = false;
+        }
+    }
+
+    // Помощник для запуска анимации стрельбы
+    public void TriggerShootAnimation()
+    {
+        shootAnimTimer = 0.35f; // Удерживаем позу стрельбы
+        isShooting = true;
+    }
+
+    // ========================================================
+    // WEAPON SYSTEM
+    // ========================================================
+
+    public void SetWeapon(WeaponTypes weapon) => playerWeapon = weapon;
+
+    void FireWeapon()
+    {
+        if (!canUseWeapon || freezeInput) return;
+        if (playerWeapon == WeaponTypes.MegaBuster) MegaBuster();
+        else if (playerWeapon == WeaponTypes.HyperBomb) HyperBomb();
+        else MegaBuster(); 
+    }
+
+    void MegaBuster()
+    {
+        // Момент клика - стреляем и начинаем зарядку
+        if (keyShoot && keyShootRelease)
+        {
+            ShootBullet();
+            TriggerShootAnimation(); 
+            isCharging = true;
+            chargeTime = 0f;
+            chargeShotReady = false;
+        }
+
+        // Удержание - копим энергию
+        if (keyShoot && isCharging)
+        {
+            chargeTime += Time.deltaTime;
+            if (chargeTime >= 1.2f && !chargeShotReady)
+            {
+                chargeShotReady = true;
+                // Тут можно добавить визуальный эффект зарядки (частицы)
+            }
+        }
+
+        // Отпускание - если заряжено, мощный выстрел
+        if (!keyShoot && isCharging)
+        {
+            isCharging = false;
+            if (chargeShotReady) 
+            {
+                ShootChargedBullet();
+                TriggerShootAnimation();
+            }
+            chargeShotReady = false;
+            chargeTime = 0f;
+        }
+    }
+
+    void ShootBullet()
+    {
+        if (bulletPrefab == null || bulletShootPos == null) return;
+        GameObject bullet = Instantiate(bulletPrefab, bulletShootPos.position, Quaternion.identity);
+        var script = bullet.GetComponent<bulletControll>();
+        if (script != null)
+        {
+            script.SetDamageValue(bulletDamage);
+            script.SetBulletSpeed(bulletSpeed);
+            script.SetBulletDirection(isFacingRight ? Vector2.right : Vector2.left);
+            script.Shoot();
+        }
+        SoundManager.Instance?.Play(shootBulletClip);
+    }
+
+    void ShootChargedBullet()
+    {
+        int idx = (int)WeaponTypes.MegaBuster;
+        GameObject prefab = weaponsData[idx].weaponPrefab != null ? weaponsData[idx].weaponPrefab : bulletPrefab;
+        GameObject bullet = Instantiate(prefab, bulletShootPos.position, Quaternion.identity);
+        
+        // Визуально увеличиваем чардж
+        bullet.transform.localScale = new Vector3(2.5f, 2.5f, 1);
+        
+        var script = bullet.GetComponent<bulletControll>();
+        if (script != null)
+        {
+            script.SetDamageValue(weaponsData[idx].weaponDamage * 4);
+            script.SetBulletSpeed(bulletSpeed * 1.4f);
+            script.SetBulletDirection(isFacingRight ? Vector2.right : Vector2.left);
+            script.Shoot();
+        }
+        SoundManager.Instance?.Play(weaponsData[idx].weaponClip != null ? weaponsData[idx].weaponClip : shootBulletClip);
+    }
+
+    void HyperBomb()
+    {
+        if (keyShoot && keyShootRelease && canUseWeapon)
+        {
+            int idx = (int)WeaponTypes.HyperBomb;
+            if (weaponsData[idx].enabled && weaponsData[idx].currentEnergy >= weaponsData[idx].energyCost)
+            {
+                isThrowing = true;
+                canUseWeapon = false;
+                keyShootRelease = false;
+                shootTime = Time.time;
+                StartCoroutine(ThrowBombRoutine());
+                SpendWeaponEnergy(WeaponTypes.HyperBomb);
+            }
+        }
+        if (isThrowing && Time.time - shootTime >= 0.25f) isThrowing = false;
+    }
+
+    IEnumerator ThrowBombRoutine()
+    {
+        yield return new WaitForSeconds(0.1f);
+        ThrowBomb();
+    }
+
+    void ThrowBomb()
+    {
+        int idx = (int)WeaponTypes.HyperBomb;
+        if (weaponsData[idx].weaponPrefab == null) return;
+        GameObject bomb = Instantiate(weaponsData[idx].weaponPrefab, bulletShootPos.position, Quaternion.identity);
+        var bombScript = bomb.GetComponent<BombScript>();
+        if (bombScript != null)
+        {
+            bombScript.SetExplosionDamageValue(weaponsData[idx].weaponDamage);
+            bombScript.SetDirection(isFacingRight ? Vector2.right : Vector2.left);
+            bombScript.SetVelocity(weaponsData[idx].weaponVelocity);
+            bombScript.ExplosionEvent.AddListener(() => canUseWeapon = true);
+            bombScript.Launch(false);
+        }
+        SoundManager.Instance?.Play(weaponsData[idx].weaponClip);
+    }
+
+    // ========================================================
+    // MOVEMENT & DASH (ИСПРАВЛЕНО)
+    // ========================================================
+
+    void StartDash()
+    {
+        isDashing = true;
+        dashTimeLeft = dashDuration;
+        canDash = false;
+        isJumping = false;
+
+        // ИСПРАВЛЕНИЕ: Автоматически уменьшаем коллайдер, чтобы не проваливаться
+        // и проползать в узкие щели (стиль Zero)
+        AdjustColliderForSlide(true);
+    }
+
+    void StopDash()
+    {
+        isDashing = false;
+        
+        // ИСПРАВЛЕНИЕ: Восстанавливаем коллайдер при остановке
+        AdjustColliderForSlide(false);
+
+        StartCoroutine(DashCooldownRoutine());
+    }
+
+    // ИСПРАВЛЕНИЕ: Метод для динамического изменения BoxCollider2D
+    void AdjustColliderForSlide(bool slide)
+    {
+        if (slide)
+        {
+            // Уменьшаем коллайдер по вертикали
+            float newHeight = originalColliderSize.y * dashColliderHeightMultiplier;
+            box2d.size = new Vector2(originalColliderSize.x, newHeight);
+
+            // Смещаем центр коллайдера вниз, чтобы ноги остались на том же месте
+            float offsetChange = (originalColliderSize.y - newHeight) / 2f;
+            box2d.offset = new Vector2(originalColliderOffset.x, originalColliderOffset.y - offsetChange);
+        }
+        else
+        {
+            // ИСПРАВЛЕНИЕ УЯЗВИМОСТИ (Mega Man Style): Перед восстановлением проверяем, нет ли потолка!
+            RaycastHit2D hitCeiling = Physics2D.BoxCast(box2d.bounds.center, new Vector2(box2d.bounds.size.x * 0.9f, 0.1f), 0f, Vector2.up, 0.3f, groundLayerMask);
+            
+            if (hitCeiling.collider == null)
+            {
+                // Потолка нет, восстанавливаем обычный размер
+                box2d.size = originalColliderSize;
+                box2d.offset = originalColliderOffset;
+            }
+            else
+            {
+                // Потолок есть! Мы "застряли" в режиме слайда. В Zero в таких случаях 
+                // дэш продолжается, пока не кончится потолок, или пока игрок не нажмет вбок.
+                // Для простоты — просто не восстанавливаем коллайдер в этом кадре.
+            }
+        }
+    }
+
+    IEnumerator DashCooldownRoutine()
+    {
+        yield return new WaitForSeconds(dashCooldown);
+        canDash = true;
+    }
+
+    void PlayerMovement()
+    {
+        if (freezePlayer) { rb2d.linearVelocity = new Vector2(0, rb2d.linearVelocity.y); return; }
+        
+        transformY = transform.position.y;
+        transformHY = transformY + climbSpriteHeight;
+
+        if (isClimbing)
+        {
+            HandleClimbingLogic();
+        }
+        else
+        {
+            if (isDashing)
+            {
+                dashTimeLeft -= Time.deltaTime;
+                // Логика физики дэша в FixedUpdate
+
+                // Прерывание деша (по времени, или нажатием "назад")
+                if (dashTimeLeft <= 0 || (isFacingRight && keyHorizontal < 0) || (!isFacingRight && keyHorizontal > 0)) StopDash();
+
+                // DASH JUMP (Фишка Mega Man Zero) - если прыгнуть во время деша
+                if (keyJump && isGrounded)
+                {
+                    StopDash(); // Сначала убираем состояние слайда
+                    rb2d.linearVelocity = new Vector2(rb2d.linearVelocity.x, jumpSpeed);
+                    StartCoroutine(JumpCo());
+                }
+            }
+            else
+            {
+                // Обычное передвижение по горизонтали
+                float targetVelX = keyHorizontal * moveSpeed;
+                rb2d.linearVelocity = new Vector2(targetVelX, rb2d.linearVelocity.y);
+
+                if (keyHorizontal != 0)
+                {
+                    if ((keyHorizontal > 0 && !isFacingRight) || (keyHorizontal < 0 && isFacingRight)) Flip();
+                }
+
+                // Прыжок
+                if (keyJump && isGrounded)
+                {
+                    rb2d.linearVelocity = new Vector2(rb2d.linearVelocity.x, jumpSpeed);
+                    StartCoroutine(JumpCo());
+                }
+
+                // Устанавливаем флаг прыжка
+                if (!isGrounded && rb2d.linearVelocity.y > 0) isJumping = true;
+            }
+
+            StartClimbingUp();
+            StartClimbingDown();
+        }
+    }
+
+    // ========================================================
+    // LADDER LOGIC
+    // ========================================================
+
+    void HandleClimbingLogic()
+    {
+        if (ladder == null) { ResetClimbing(); return; }
+
+        if (transformHY > ladder.posTopHandlerY)
+        {
+            if (!isClimbingDown)
+            {
+                if (!startedClimbTransition) { startedClimbTransition = true; ClimbTransition(true); }
+                else if (finishedClimbTransition)
+                {
+                    finishedClimbTransition = false;
+                    transform.position = new Vector2(ladder.posX, ladder.posPlatformY + 0.01f);
+                    if (!atLaddersEnd) { atLaddersEnd = true; Invoke("ResetClimbing", 0.1f); }
+                }
+            }
+        }
+        else if (transformHY < ladder.posBottomHandlerY) ResetClimbing();
+        else
+        {
+            rb2d.linearVelocity = Vector2.zero;
+            if (keyVertical != 0) transform.position += new Vector3(0, climbSpeed * keyVertical * Time.deltaTime, 0);
+        }
+    }
+
+    public void StartClimbingUp()
+    {
+        if (ladder != null && ladder.isNearLadder && keyVertical > 0 && transformHY < ladder.posTopHandlerY)
+        {
+            if (isDashing) StopDash(); // Отменяем слайд
+            isClimbing = true; isClimbingDown = false;
+            rb2d.bodyType = RigidbodyType2D.Kinematic;
+            rb2d.linearVelocity = Vector2.zero;
+            // Центрируем игрока по лестнице
+            transform.position = new Vector3(ladder.posX, transform.position.y, 0);
+        }
+    }
+
+    public void StartClimbingDown()
+    {
+        if (ladder != null && ladder.isNearLadder && keyVertical < 0 && isGrounded && transformHY > ladder.posTopHandlerY)
+        {
+            if (isDashing) StopDash(); // Отменяем слайд
+            isClimbing = true; isClimbingDown = true;
+            rb2d.bodyType = RigidbodyType2D.Kinematic;
+            rb2d.linearVelocity = Vector2.zero;
+            ClimbTransition(false);
+        }
+    }
+
+    public void ResetClimbing()
+    {
+        if (!isClimbing) return;
+        isClimbing = false;
+        rb2d.bodyType = RigidbodyType2D.Dynamic;
+    }
+
+    void ClimbTransition(bool up) => StartCoroutine(ClimbTransitionCo(up));
+    
+    IEnumerator ClimbTransitionCo(bool up)
+    {
+        FreezeInput(true);
+        Vector3 target = up ? new Vector3(ladder.posX, transform.position.y + 0.45f, 0) : new Vector3(ladder.posX, ladder.posTopHandlerY - climbSpriteHeight - 0.1f, 0);
+        
+        while (Vector3.Distance(transform.position, target) > 0.05f)
+        {
+            transform.position = Vector3.MoveTowards(transform.position, target, climbSpeed * 1.5f * Time.deltaTime);
+            yield return null;
+        }
+        finishedClimbTransition = true;
+        FreezeInput(false);
+    }
+
+    // ========================================================
+    // HEALTH, DAMAGE, DEFEAT
+    // ========================================================
+
+    void Flip()
+    {
+        isFacingRight = !isFacingRight;
+        transform.Rotate(0f, 180f, 0f);
+    }
+
+    public void TakeDamage(int damage)
+    {
+        if (isInvincible || isTakingDamage || isTeleporting) return;
+        currentHealth -= damage;
+        currentHealth = Mathf.Clamp(currentHealth, 0, maxHealth);
+        UIEnergyBars.Instance?.SetValue(UIEnergyBars.EnergyBars.PlayerHealth, (float)currentHealth / maxHealth);
+        
+        if (currentHealth <= 0) Defeat();
+        else StartDamageAnimation();
+    }
+
+    void StartDamageAnimation()
+    {
+        if (isDashing) StopDash(); // Удар прерывает дэш
+        if (isClimbing) ResetClimbing(); // Удар сбивает с лестницы
+
+        isTakingDamage = true;
+        isInvincible = true;
+        FreezeInput(true);
+        
+        rb2d.linearVelocity = new Vector2(isFacingRight ? -moveSpeed * 0.8f : moveSpeed * 0.8f, jumpSpeed * 0.4f);
+        SoundManager.Instance?.Play(takingDamageClip);
+        
+        Invoke("StopDamageAnimation", 0.6f); // Длительность стана
+    }
+
+    void StopDamageAnimation()
+    {
+        isTakingDamage = false;
+        FreezeInput(false);
+        rb2d.linearVelocity = Vector2.zero;
+        StartCoroutine(FlashRoutine());
+    }
+
+    IEnumerator FlashRoutine()
+    {
+        // Мигание после урона
+        for (int i = 0; i < 7; i++)
+        {
+            sprite.color = new Color(1, 1, 1, 0.1f);
+            yield return new WaitForSeconds(0.1f);
+            sprite.color = Color.white;
+            yield return new WaitForSeconds(0.1f);
+        }
+        isInvincible = false;
+    }
+
+    public void Defeat()
+    {
+        FreezeInput(true);
+        FreezePlayer(true);
+        GameManager.Instance?.PlayerDefeated();
+        if (explodeEffectPrefab) Instantiate(explodeEffectPrefab, transform.position, Quaternion.identity);
+        Destroy(gameObject);
+    }
+
+    // ========================================================
+    // INPUT WRAPPERS & UTILS
+    // ========================================================
+
+    void PlayerDirectionInput()
+    {
+        if (freezeInput) { keyHorizontal = 0; keyVertical = 0; return; }
+        keyHorizontal = Input.GetAxisRaw("Horizontal");
+        keyVertical = Input.GetAxisRaw("Vertical");
+    }
+
+    void PlayerJumpInput() { if (!freezeInput) keyJump = Input.GetKeyDown(KeyCode.Space); }
+    
+    void PlayerShootInput()
+    {
+        if (freezeInput) return;
+        bool wasPressed = keyShoot;
+        keyShoot = Input.GetKey(KeyCode.C);
+        // Выстрел засчитывается только при первом нажатии кнопки
+        keyShootRelease = keyShoot && !wasPressed;
+    }
+
+    void PlayerDebugInput()
+    {
+        if (Input.GetKeyDown(KeyCode.R)) UnityEngine.SceneManagement.SceneManager.LoadScene(UnityEngine.SceneManagement.SceneManager.GetActiveScene().buildIndex);
+    }
+
+    // Утилитные методы
+    public void SetWeaponLegacy(PlayerWeapons weapon) => playerWeaponLegacy = weapon;
+    public void FillWeaponEnergies() { for (int i = 0; i < weaponsData.Length; i++) weaponsData[i].currentEnergy = weaponsData[i].maxEnergy; }
+    
+    void SpendWeaponEnergy(WeaponTypes type)
+    {
+        int idx = (int)type;
+        weaponsData[idx].currentEnergy -= weaponsData[idx].energyCost;
+        weaponsData[idx].currentEnergy = Mathf.Clamp(weaponsData[idx].currentEnergy, 0, weaponsData[idx].maxEnergy);
+        RefreshWeaponEnergyBar(type);
+    }
+
+    void RefreshWeaponEnergyBar(WeaponTypes type)
+    {
+        UIEnergyBars.Instance?.SetValue(UIEnergyBars.EnergyBars.PlayerWeapon, (float)weaponsData[(int)type].currentEnergy / weaponsData[(int)type].maxEnergy);
+    }
+
+    public void FreezeInput(bool freeze) { freezeInput = freeze; keyHorizontal = 0; keyVertical = 0; keyJump = false; keyShoot = false; }
+    public void FreezePlayer(bool freeze) { freezePlayer = freeze; if (freeze) rb2d.linearVelocity = new Vector2(0, rb2d.linearVelocity.y); }
+    public void Invincible(bool active) => isInvincible = active;
+
+    public void Teleport(bool start)
+    {
+        isTeleporting = start;
+        if (start) { teleportState = TeleportState.Descending; FreezeInput(true); rb2d.linearVelocity = new Vector2(0, teleportSpeed); }
+        else { FreezeInput(false); }
+    }
+
+    IEnumerator JumpCo() { yield return new WaitForSeconds(0.1f); }
+
+    // Мобильное управление
+    public void SimulateMoveLeft() => keyHorizontal = -1f;
+    public void SimulateMoveRight() => keyHorizontal = 1f;
+    public void SimulateMoveStop() => keyHorizontal = 0f;
+    public void SimulateJump() { if(isGrounded && !freezeInput) rb2d.linearVelocity = new Vector2(rb2d.linearVelocity.x, jumpSpeed); }
+}
