@@ -1,0 +1,263 @@
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+
+public class Charactercontrol : MonoBehaviour
+{
+    #region Переменные компонентов
+    Animator animator;
+    BoxCollider2D box2d;
+    Rigidbody2D rb2d;
+    SpriteRenderer sprite;
+    ColorSwap colorSwap;
+    #endregion
+
+    #region Состояния и ввод
+    float keyHorizontal;
+    float keyVertical;
+    bool keyJump;
+    bool keyShoot;
+
+    public bool isGrounded;
+    bool isJumping;
+    bool isShooting;
+    bool isThrowing = false;
+    bool isTeleporting;
+    bool isTakingDamage;
+    bool isInvincible;
+    bool isFacingRight = true;
+
+    bool freezeInput;
+    bool freezePlayer;
+    
+    // Переменные для стрельбы и зарядки
+    [Header("Buster Settings")]
+    public float chargeTimer = 0f;
+    public bool isCharging = false;
+    [SerializeField] GameObject midChargePrefab;  // Назначь в инспекторе
+    [SerializeField] GameObject fullChargePrefab; // Назначь в инспекторе
+    float shootTime;
+    #endregion
+
+    #region Настройки движения
+    [Header("Movement Settings")]
+    [SerializeField] float moveSpeed = 5f; // Увеличил для отзывчивости
+    [SerializeField] float jumpSpeed = 5.5f;
+    [SerializeField] float climbSpeed = 2f;
+    #endregion
+
+    #region Лестницы и окружение
+    bool isClimbing;
+    public LadderScript ladder;
+    int groundLayerMask;
+    #endregion
+
+    #region Оружие (Структуры)
+    public enum WeaponTypes { MegaBuster, HyperBomb, ThunderBeam, SuperArm, IceSlasher, RollingCutter, FireStorm, MagnetBeam }
+    public WeaponTypes playerWeapon = WeaponTypes.MegaBuster;
+
+    [System.Serializable]
+    public struct WeaponsStruct {
+        public WeaponTypes weaponType;
+        public bool enabled;
+        public int currentEnergy;
+        public int energyCost;
+        public int weaponDamage;
+        public GameObject weaponPrefab;
+        public AudioClip weaponClip;
+    }
+    public WeaponsStruct[] weaponsData;
+    #endregion
+
+    void Awake()
+    {
+        animator = GetComponent<Animator>();
+        box2d = GetComponent<BoxCollider2D>();
+        rb2d = GetComponent<Rigidbody2D>();
+        sprite = GetComponent<SpriteRenderer>();
+        groundLayerMask = 1 << LayerMask.NameToLayer("Ground");
+    }
+
+    void Start()
+    {
+        isFacingRight = true;
+        if (weaponsData == null || weaponsData.Length == 0) InitWeapons();
+    }
+
+    void Update()
+    {
+        if (isTeleporting || isTakingDamage) return;
+
+        GetInputs();
+        HandleMegaBusterCharge(); // Логика зарядки
+        UpdateAnimations();       // Твоя логика анимаций
+    }
+
+    void FixedUpdate()
+    {
+        CheckGround();
+        if (!freezePlayer)
+        {
+            MovePlayer();
+        }
+    }
+
+    #region Логика Ввода и Движения
+    void GetInputs()
+    {
+        if (!freezeInput)
+        {
+            keyHorizontal = Input.GetAxisRaw("Horizontal");
+            keyVertical = Input.GetAxisRaw("Vertical");
+            keyJump = Input.GetKeyDown(KeyCode.Space);
+            keyShoot = Input.GetKey(KeyCode.C);
+        }
+    }
+
+    void MovePlayer()
+    {
+        if (isClimbing)
+        {
+            rb2d.bodyType = RigidbodyType2D.Kinematic;
+            rb2d.linearVelocity = new Vector2(0, keyVertical * climbSpeed);
+            return;
+        }
+
+        rb2d.bodyType = RigidbodyType2D.Dynamic;
+        
+        // Прямое управление скоростью (Horizontal Move)
+        rb2d.linearVelocity = new Vector2(keyHorizontal * moveSpeed, rb2d.linearVelocity.y);
+
+        // Прыжок
+        if (keyJump && isGrounded)
+        {
+            rb2d.linearVelocity = new Vector2(rb2d.linearVelocity.x, jumpSpeed);
+            isJumping = true;
+        }
+
+        // Поворот персонажа
+        if (keyHorizontal > 0 && !isFacingRight) Flip();
+        else if (keyHorizontal < 0 && isFacingRight) Flip();
+    }
+
+    void Flip()
+    {
+        isFacingRight = !isFacingRight;
+        transform.Rotate(0, 180, 0);
+    }
+
+    void CheckGround()
+    {
+        float rayDistance = 0.1f;
+        RaycastHit2D hit = Physics2D.BoxCast(box2d.bounds.center, box2d.bounds.size, 0f, Vector2.down, rayDistance, groundLayerMask);
+        isGrounded = hit.collider != null;
+        if (isGrounded) isJumping = false;
+    }
+    #endregion
+
+    #region Система Стрельбы (Mega Buster)
+    void HandleMegaBusterCharge()
+    {
+        if (freezeInput) return;
+
+        // 1. Начало нажатия
+        if (Input.GetKeyDown(KeyCode.C))
+        {
+            isCharging = true;
+            chargeTimer = 0f;
+            ShootRegular(); // Обычный выстрел сразу
+        }
+
+        // 2. Удержание
+        if (Input.GetKey(KeyCode.C) && isCharging)
+        {
+            chargeTimer += Time.deltaTime;
+            UpdateChargeEffects(); // Эффект мигания
+        }
+
+        // 3. Отпускание
+        if (Input.GetKeyUp(KeyCode.C))
+        {
+            if (chargeTimer >= 1.2f) FireCharged(2); // Полный заряд
+            else if (chargeTimer >= 0.5f) FireCharged(1); // Средний заряд
+            
+            ResetChargeState();
+        }
+    }
+
+    void UpdateChargeEffects()
+    {
+        if (chargeTimer >= 1.2f)
+            sprite.color = Mathf.PingPong(Time.time * 20, 1) > 0.5f ? Color.yellow : Color.white;
+        else if (chargeTimer >= 0.5f)
+            sprite.color = Mathf.PingPong(Time.time * 10, 1) > 0.5f ? Color.cyan : Color.white;
+    }
+
+    void ResetChargeState()
+    {
+        isCharging = false;
+        chargeTimer = 0f;
+        sprite.color = Color.white;
+    }
+
+    void ShootRegular()
+    {
+        isShooting = true;
+        shootTime = Time.time;
+        // Создание обычной пули
+        GameObject b = Instantiate(weaponsData[(int)WeaponTypes.MegaBuster].weaponPrefab, transform.position, Quaternion.identity);
+        SetupBullet(b, 1, 1f);
+    }
+
+    void FireCharged(int level)
+    {
+        isShooting = true;
+        shootTime = Time.time;
+        GameObject prefab = (level == 2) ? fullChargePrefab : midChargePrefab;
+        if (prefab == null) prefab = weaponsData[(int)WeaponTypes.MegaBuster].weaponPrefab;
+
+        GameObject b = Instantiate(prefab, transform.position, Quaternion.identity);
+        SetupBullet(b, level == 2 ? 4 : 2, level == 2 ? 1.5f : 1.2f);
+    }
+
+    void SetupBullet(GameObject bullet, int damage, float scale)
+    {
+        bullet.transform.localScale *= scale;
+        var script = bullet.GetComponent<bulletControll>();
+        if (script != null)
+        {
+            script.SetDamageValue(damage);
+            script.SetBulletDirection(isFacingRight ? Vector2.right : Vector2.left);
+            script.Shoot();
+        }
+    }
+    #endregion
+
+    #region Анимации (Твоя база)
+    void UpdateAnimations()
+    {
+        if (Time.time - shootTime > 0.3f) isShooting = false;
+
+        if (isClimbing) {
+            animator.Play(isShooting ? "ladder_shoot" : "ladder_climb");
+            return;
+        }
+
+        if (!isGrounded) {
+            animator.Play(isShooting ? "jump_shoot" : "jump");
+        } else {
+            if (keyHorizontal != 0) {
+                animator.Play(isShooting ? "shoot_run" : "Run");
+            } else {
+                animator.Play(isShooting ? "shoot" : "idle");
+            }
+        }
+    }
+    #endregion
+
+    void InitWeapons() {
+        // Здесь инициализация массива оружия как в твоем оригинале
+        weaponsData = new WeaponsStruct[Enum.GetValues(typeof(WeaponTypes)).Length];
+    }
+}
