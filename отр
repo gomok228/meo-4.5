@@ -1,0 +1,228 @@
+using System;
+using UnityEngine;
+
+public class Charactercontrol : MonoBehaviour
+{
+    // =====================================================
+    // COMPONENTS
+    // =====================================================
+    private Animator animator;
+    private Rigidbody2D rb;
+    private BoxCollider2D box;
+    private SpriteRenderer sprite;
+
+    // =====================================================
+    // INPUT
+    // =====================================================
+    private float inputX;
+    private float inputY;
+    private bool jumpPressed;
+    private bool shootHeld;
+
+    // =====================================================
+    // STATE
+    // =====================================================
+    private bool isGrounded;
+    private bool isJumping;
+    private bool isFacingRight = true;
+    private bool isShooting;
+
+    // =====================================================
+    // MOVEMENT SETTINGS
+    // =====================================================
+    [Header("Movement")]
+    [SerializeField] private float moveSpeed = 5f;
+    [SerializeField] private float jumpForce = 6f;
+
+    private int groundMask;
+
+    // =====================================================
+    // CHARGE SYSTEM
+    // =====================================================
+    [Header("Mega Buster")]
+    [SerializeField] private float midChargeTime = 0.5f;
+    [SerializeField] private float fullChargeTime = 1.2f;
+
+    private float chargeTimer;
+    private bool isCharging;
+
+    // =====================================================
+    // UNITY
+    // =====================================================
+    void Awake()
+    {
+        animator = GetComponent<Animator>();
+        rb = GetComponent<Rigidbody2D>();
+        box = GetComponent<BoxCollider2D>();
+        sprite = GetComponent<SpriteRenderer>();
+
+        groundMask = 1 << LayerMask.NameToLayer("Ground");
+    }
+
+    void Update()
+    {
+        GetInput();
+        HandleCharge();
+        UpdateAnimations();
+    }
+
+    void FixedUpdate()
+    {
+        CheckGround();
+        Move();
+    }
+
+    // =====================================================
+    // INPUT
+    // =====================================================
+    void GetInput()
+    {
+        inputX = Input.GetAxisRaw("Horizontal");
+        inputY = Input.GetAxisRaw("Vertical");
+
+        jumpPressed = Input.GetKeyDown(KeyCode.Space);
+        shootHeld = Input.GetKey(KeyCode.C);
+    }
+
+    // =====================================================
+    // MOVEMENT
+    // =====================================================
+    void Move()
+    {
+        // Horizontal movement
+        rb.linearVelocity = new Vector2(inputX * moveSpeed, rb.linearVelocity.y);
+
+        // Jump
+        if (jumpPressed && isGrounded)
+        {
+            rb.linearVelocity = new Vector2(rb.linearVelocity.x, jumpForce);
+            isJumping = true;
+        }
+
+        // Flip
+        if (inputX > 0 && !isFacingRight) Flip();
+        else if (inputX < 0 && isFacingRight) Flip();
+    }
+
+    void Flip()
+    {
+        isFacingRight = !isFacingRight;
+        transform.Rotate(0, 180, 0);
+    }
+
+    void CheckGround()
+    {
+        RaycastHit2D hit = Physics2D.BoxCast(
+            box.bounds.center,
+            box.bounds.size,
+            0f,
+            Vector2.down,
+            0.1f,
+            groundMask
+        );
+
+        isGrounded = hit.collider != null;
+
+        if (isGrounded)
+            isJumping = false;
+    }
+
+    // =====================================================
+    // CHARGE SYSTEM
+    // =====================================================
+    void HandleCharge()
+    {
+        // Press
+        if (Input.GetKeyDown(KeyCode.C))
+        {
+            isCharging = true;
+            chargeTimer = 0f;
+
+            ShootNormal();
+        }
+
+        // Hold
+        if (shootHeld && isCharging)
+        {
+            chargeTimer += Time.deltaTime;
+            UpdateChargeVisual();
+        }
+
+        // Release
+        if (Input.GetKeyUp(KeyCode.C))
+        {
+            if (chargeTimer >= fullChargeTime)
+                ShootCharged(2);
+            else if (chargeTimer >= midChargeTime)
+                ShootCharged(1);
+
+            ResetCharge();
+        }
+    }
+
+    void UpdateChargeVisual()
+    {
+        if (chargeTimer >= fullChargeTime)
+        {
+            sprite.color = Mathf.PingPong(Time.time * 20, 1) > 0.5f
+                ? Color.yellow : Color.white;
+        }
+        else if (chargeTimer >= midChargeTime)
+        {
+            sprite.color = Mathf.PingPong(Time.time * 10, 1) > 0.5f
+                ? Color.cyan : Color.white;
+        }
+    }
+
+    void ResetCharge()
+    {
+        isCharging = false;
+        chargeTimer = 0f;
+        sprite.color = Color.white;
+    }
+
+    // =====================================================
+    // SHOOTING
+    // =====================================================
+    void ShootNormal()
+    {
+        isShooting = true;
+        Invoke(nameof(StopShooting), 0.2f);
+
+        Debug.Log("Normal shot");
+    }
+
+    void ShootCharged(int level)
+    {
+        isShooting = true;
+        Invoke(nameof(StopShooting), 0.3f);
+
+        Debug.Log("Charged level: " + level);
+    }
+
+    void StopShooting()
+    {
+        isShooting = false;
+    }
+
+    // =====================================================
+    // ANIMATIONS
+    // =====================================================
+    void UpdateAnimations()
+    {
+        if (!isGrounded)
+        {
+            animator.Play(isShooting ? "jump_shoot" : "jump");
+            return;
+        }
+
+        if (inputX != 0)
+        {
+            animator.Play(isShooting ? "shoot_run" : "Run");
+        }
+        else
+        {
+            animator.Play(isShooting ? "shoot" : "idle");
+        }
+    }
+}
