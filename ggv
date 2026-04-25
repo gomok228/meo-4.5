@@ -1,0 +1,76 @@
+using UnityEngine;
+
+public class PrototypeCar : MonoBehaviour
+{
+    [Header("Wheel Colliders")]
+    public WheelCollider frontLeftWheel;
+    public WheelCollider frontRightWheel;
+    public WheelCollider rearLeftWheel;
+    public WheelCollider rearRightWheel;
+
+    [Header("LMP Settings")]
+    public float motorTorque = 2500f;
+    public float steerAngle = 22f;
+    public float brakeForce = 4000f;
+    public float downforce = 150f;
+    [Range(0.5f, 1f)]
+    public float brakeBiasFront = 0.65f; // 65% тормозного усилия на передние, 35% на задние
+
+    [Header("Stability")]
+    [SerializeField] private Vector3 centerOfMassOffset = new Vector3(0, -0.1f, 0); // Чуть приподнял CoM, чтобы не цеплять дном пол при прыжках
+    [SerializeField] private float suspensionDistance = 0.05f;
+
+    private float moveInput;
+    private float steerInput;
+    private Rigidbody rb;
+
+    void Start()
+    {
+        rb = GetComponent<Rigidbody>();
+        if (rb != null) rb.centerOfMass = centerOfMassOffset;
+
+        WheelCollider[] allWheels = GetComponentsInChildren<WheelCollider>();
+        foreach (WheelCollider wheel in allWheels)
+        {
+            wheel.suspensionDistance = suspensionDistance;
+            JointSpring spring = wheel.suspensionSpring;
+            spring.spring = 80000f;
+            spring.damper = 10000f;
+            wheel.suspensionSpring = spring;
+            wheel.enabled = false; wheel.enabled = true;
+        }
+    }
+
+    void Update()
+    {
+        moveInput = Input.GetAxis("Vertical");
+        steerInput = Input.GetAxis("Horizontal");
+    }
+
+    void FixedUpdate()
+    {
+        rearLeftWheel.motorTorque = moveInput * motorTorque;
+        rearRightWheel.motorTorque = moveInput * motorTorque;
+
+        frontLeftWheel.steerAngle = steerInput * steerAngle;
+        frontRightWheel.steerAngle = steerInput * steerAngle;
+
+        bool isBraking = Input.GetKey(KeyCode.Space);
+        
+        // Распределяем тормозное усилие как в настоящем гоночном авто
+        float frontBrake = isBraking ? brakeForce * brakeBiasFront : 0f;
+        float rearBrake = isBraking ? brakeForce * (1f - brakeBiasFront) : 0f;
+
+        frontLeftWheel.brakeTorque = frontBrake;
+        frontRightWheel.brakeTorque = frontBrake;
+        rearLeftWheel.brakeTorque = rearBrake;
+        rearRightWheel.brakeTorque = rearBrake;
+
+        // Ограничиваем максимальную скорость для расчета прижимной силы (защита от провала под карту)
+        float currentSpeed = Mathf.Clamp(rb.linearVelocity.magnitude, 0f, 100f);
+        if (currentSpeed > 5f)
+        {
+            rb.AddForce(-transform.up * downforce * currentSpeed);
+        }
+    }
+}
