@@ -1,0 +1,73 @@
+using UnityEngine;
+
+public class NascarCar : MonoBehaviour
+{
+    [Header("Wheel Colliders")]
+    public WheelCollider frontLeftWheel;
+    public WheelCollider frontRightWheel;
+    public WheelCollider rearLeftWheel;
+    public WheelCollider rearRightWheel;
+
+    [Header("NASCAR Settings")]
+    public float motorTorque = 3500f; // Огромная дурь под капотом V8
+    public float steerAngle = 18f;    // Тугой руль, машина не любит резкие повороты
+    public float brakeForce = 2000f;  // Тормоза слабоваты для такой массы
+    public float downforce = 40f;     // Прижимной силы почти нет, держится за счет веса
+
+    [Header("Stability")]
+    [SerializeField] private Vector3 centerOfMassOffset = new Vector3(0, -0.4f, 0); // Низкий центр тяжести от переворотов
+    [SerializeField] private float suspensionDistance = 0.1f; // Подвеска чуть мягче, чем у прототипов
+
+    private float moveInput;
+    private float steerInput;
+    private Rigidbody rb;
+
+    void Start()
+    {
+        rb = GetComponent<Rigidbody>();
+        if (rb != null) rb.centerOfMass = centerOfMassOffset;
+
+        WheelCollider[] allWheels = GetComponentsInChildren<WheelCollider>();
+        foreach (WheelCollider wheel in allWheels)
+        {
+            wheel.suspensionDistance = suspensionDistance;
+            
+            // Жесткая подвеска, но мягче чем у F1
+            JointSpring spring = wheel.suspensionSpring;
+            spring.spring = 50000f;
+            spring.damper = 6000f;
+            wheel.suspensionSpring = spring;
+
+            wheel.enabled = false; wheel.enabled = true;
+        }
+    }
+
+    void Update()
+    {
+        moveInput = Input.GetAxis("Vertical");
+        steerInput = Input.GetAxis("Horizontal");
+    }
+
+    void FixedUpdate()
+    {
+        // Только задний привод
+        rearLeftWheel.motorTorque = moveInput * motorTorque;
+        rearRightWheel.motorTorque = moveInput * motorTorque;
+
+        frontLeftWheel.steerAngle = steerInput * steerAngle;
+        frontRightWheel.steerAngle = steerInput * steerAngle;
+
+        bool isBraking = Input.GetKey(KeyCode.Space);
+        float brake = isBraking ? brakeForce : 0f;
+        rearLeftWheel.brakeTorque = brake;
+        rearRightWheel.brakeTorque = brake;
+        frontLeftWheel.brakeTorque = brake;
+        frontRightWheel.brakeTorque = brake;
+
+        // Легкая аэродинамика
+        if (rb.linearVelocity.magnitude > 5f)
+        {
+            rb.AddForce(-transform.up * downforce * rb.linearVelocity.magnitude);
+        }
+    }
+}
